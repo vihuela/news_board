@@ -2,30 +2,35 @@ import Link from "next/link";
 
 type Category = "pulse" | "tech" | "business";
 
+type SourceKind =
+  | "baidu"
+  | "toutiao"
+  | "bilibili"
+  | "hackernews"
+  | "github"
+  | "v2ex"
+  | "ai"
+  | "devto"
+  | "wallstreet-hot"
+  | "wallstreet-live";
+
 type SourceDefinition = {
   id: string;
   name: string;
   shortName: string;
   category: Category;
+  kind: SourceKind;
+  endpoint: string;
   expectedDomains?: string[];
 };
 
-type FeedItem = {
-  id?: string | number;
-  title?: string;
-  url?: string;
-  mobileUrl?: string;
-  pubDate?: string;
-  extra?: {
-    info?: string;
-    hover?: string;
-  };
-};
-
-type FeedResponse = {
-  status?: "success" | "cache" | string;
-  updatedTime?: number;
-  items?: FeedItem[];
+type RawStory = {
+  id: string | number;
+  title: unknown;
+  url: unknown;
+  pubDate?: number;
+  info?: unknown;
+  summary?: unknown;
 };
 
 type Story = {
@@ -47,24 +52,21 @@ type SourceResult = {
 
 const SOURCES: SourceDefinition[] = [
   {
-    id: "weibo",
-    name: "微博热搜",
-    shortName: "微博",
+    id: "baidu",
+    name: "百度热搜",
+    shortName: "百度",
     category: "pulse",
-    expectedDomains: ["weibo.com"],
-  },
-  {
-    id: "zhihu",
-    name: "知乎热榜",
-    shortName: "知乎",
-    category: "pulse",
-    expectedDomains: ["zhihu.com"],
+    kind: "baidu",
+    endpoint: "https://top.baidu.com/api/board?platform=wise&tab=realtime",
+    expectedDomains: ["baidu.com"],
   },
   {
     id: "toutiao",
     name: "今日头条",
     shortName: "头条",
     category: "pulse",
+    kind: "toutiao",
+    endpoint: "https://www.toutiao.com/hot-event/hot-board/?origin=toutiao_pc",
     expectedDomains: ["toutiao.com"],
   },
   {
@@ -72,6 +74,8 @@ const SOURCES: SourceDefinition[] = [
     name: "B 站热搜",
     shortName: "B 站",
     category: "pulse",
+    kind: "bilibili",
+    endpoint: "https://s.search.bilibili.com/main/hotword?limit=30",
     expectedDomains: ["bilibili.com"],
   },
   {
@@ -79,6 +83,8 @@ const SOURCES: SourceDefinition[] = [
     name: "Hacker News",
     shortName: "HN",
     category: "tech",
+    kind: "hackernews",
+    endpoint: "https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=20",
     expectedDomains: ["ycombinator.com"],
   },
   {
@@ -86,6 +92,8 @@ const SOURCES: SourceDefinition[] = [
     name: "GitHub Trending",
     shortName: "GitHub",
     category: "tech",
+    kind: "github",
+    endpoint: "https://github.com/trending?since=daily",
     expectedDomains: ["github.com"],
   },
   {
@@ -93,27 +101,45 @@ const SOURCES: SourceDefinition[] = [
     name: "V2EX 热议",
     shortName: "V2EX",
     category: "tech",
+    kind: "v2ex",
+    endpoint: "https://www.v2ex.com/api/topics/hot.json",
     expectedDomains: ["v2ex.com"],
   },
   {
-    id: "aihot",
-    name: "AI 热讯",
+    id: "ai-discussed",
+    name: "AI 新讨论",
     shortName: "AI",
     category: "tech",
+    kind: "ai",
+    endpoint: "https://hn.algolia.com/api/v1/search_by_date?query=AI&tags=story&numericFilters=points%3E%3D5&hitsPerPage=20",
+    expectedDomains: ["ycombinator.com"],
+  },
+  {
+    id: "devto",
+    name: "DEV 热门",
+    shortName: "DEV",
+    category: "tech",
+    kind: "devto",
+    endpoint: "https://dev.to/api/articles?top=1&per_page=20",
+    expectedDomains: ["dev.to"],
   },
   {
     id: "wallstreetcn-hot",
     name: "华尔街见闻",
     shortName: "见闻",
     category: "business",
+    kind: "wallstreet-hot",
+    endpoint: "https://api-one.wallstcn.com/apiv1/content/articles/hot?period=all",
     expectedDomains: ["wallstreetcn.com"],
   },
   {
-    id: "cls-hot",
-    name: "财联社热门",
-    shortName: "财联社",
+    id: "wallstreetcn-live",
+    name: "财经快讯",
+    shortName: "快讯",
     category: "business",
-    expectedDomains: ["cls.cn"],
+    kind: "wallstreet-live",
+    endpoint: "https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&limit=30",
+    expectedDomains: ["wallstreetcn.com"],
   },
 ];
 
@@ -168,37 +194,207 @@ function safeUrl(value: unknown, expectedDomains?: string[]) {
   }
 }
 
+const requestOptions = {
+  headers: {
+    Accept: "application/json, text/plain, text/html, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "User-Agent": "Mozilla/5.0 (compatible; RickyNews/2.0)",
+  },
+} satisfies RequestInit;
+
+async function fetchPayload<T>(endpoint: string): Promise<T> {
+  const response = await fetch(endpoint, requestOptions);
+  if (!response.ok) throw new Error(`Source returned ${response.status}`);
+  return response.json() as Promise<T>;
+}
+
+async function fetchText(endpoint: string) {
+  const response = await fetch(endpoint, requestOptions);
+  if (!response.ok) throw new Error(`Source returned ${response.status}`);
+  return response.text();
+}
+
+function decodeHtml(value: string) {
+  return value
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([\da-f]+);/gi, (_, code: string) => String.fromCodePoint(Number.parseInt(code, 16)))
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function discussionInfo(points?: number, comments?: number) {
+  const parts = [];
+  if (typeof points === "number") parts.push(`${points} 分`);
+  if (typeof comments === "number") parts.push(`${comments} 条讨论`);
+  return parts.join(" · ");
+}
+
+async function loadRawStories(source: SourceDefinition): Promise<RawStory[]> {
+  if (source.kind === "baidu") {
+    type BaiduItem = {
+      isTop?: boolean;
+      index?: number;
+      labelTagName?: string;
+      newHotName?: string;
+      url?: string;
+      word?: string;
+    };
+    const data = await fetchPayload<{
+      data?: { cards?: Array<{ content?: Array<{ content?: BaiduItem[] }> }> };
+    }>(source.endpoint);
+    const items = data.data?.cards?.flatMap((card) => card.content ?? [])
+      .flatMap((group) => group.content ?? []) ?? [];
+    return items.filter((item) => !item.isTop).map((item, index) => ({
+      id: `baidu-${item.index ?? index}`,
+      title: item.word,
+      url: item.url,
+      info: item.labelTagName ?? item.newHotName,
+    }));
+  }
+
+  if (source.kind === "toutiao") {
+    const data = await fetchPayload<{
+      data?: Array<{ ClusterIdStr?: string; HotValue?: string; Title?: string }>;
+    }>(source.endpoint);
+    return (data.data ?? []).map((item, index) => ({
+      id: item.ClusterIdStr ?? index,
+      title: item.Title,
+      url: `https://www.toutiao.com/trending/${item.ClusterIdStr}/`,
+      info: item.HotValue ? `${Math.round(Number(item.HotValue) / 10_000)} 万热度` : undefined,
+    }));
+  }
+
+  if (source.kind === "bilibili") {
+    const data = await fetchPayload<{
+      list?: Array<{ keyword?: string; pos?: number; show_name?: string }>;
+    }>(source.endpoint);
+    return (data.list ?? []).map((item, index) => ({
+      id: item.keyword ?? index,
+      title: item.show_name,
+      url: `https://search.bilibili.com/all?keyword=${encodeURIComponent(item.keyword ?? "")}`,
+      info: `热搜 #${item.pos ?? index + 1}`,
+    }));
+  }
+
+  if (source.kind === "hackernews" || source.kind === "ai") {
+    const data = await fetchPayload<{
+      hits?: Array<{
+        created_at?: string;
+        num_comments?: number;
+        objectID?: string;
+        points?: number;
+        title?: string;
+      }>;
+    }>(source.endpoint);
+    return (data.hits ?? []).map((item, index) => ({
+      id: item.objectID ?? index,
+      title: item.title,
+      url: `https://news.ycombinator.com/item?id=${item.objectID}`,
+      pubDate: item.created_at ? Date.parse(item.created_at) : undefined,
+      info: discussionInfo(item.points, item.num_comments),
+    }));
+  }
+
+  if (source.kind === "github") {
+    const html = await fetchText(source.endpoint);
+    const articles = html.match(/<article[^>]*class="[^"]*\bBox-row\b[^"]*"[^>]*>[\s\S]*?<\/article>/gi) ?? [];
+    return articles.map((article, index) => {
+      const repo = article.match(/<h2[^>]*>[\s\S]*?<a[^>]*href="(\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+      const description = article.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+      const starsToday = article.match(/([\d,]+\s+stars today)/i);
+      return {
+        id: repo?.[1] ?? index,
+        title: repo ? decodeHtml(repo[2]).replace(/\s*\/\s*/g, "/") : undefined,
+        url: repo ? `https://github.com${repo[1]}` : undefined,
+        info: starsToday ? decodeHtml(starsToday[1]) : undefined,
+        summary: description ? decodeHtml(description[1]) : undefined,
+      };
+    });
+  }
+
+  if (source.kind === "v2ex") {
+    const data = await fetchPayload<Array<{
+      content?: string;
+      id?: number;
+      node?: { title?: string };
+      replies?: number;
+      title?: string;
+      url?: string;
+    }>>(source.endpoint);
+    return data.map((item, index) => ({
+      id: item.id ?? index,
+      title: item.title,
+      url: item.url,
+      info: `${item.replies ?? 0} 回复${item.node?.title ? ` · ${item.node.title}` : ""}`,
+      summary: item.content,
+    }));
+  }
+
+  if (source.kind === "devto") {
+    const data = await fetchPayload<Array<{
+      comments_count?: number;
+      description?: string;
+      id?: number;
+      positive_reactions_count?: number;
+      title?: string;
+      url?: string;
+    }>>(source.endpoint);
+    return data.map((item, index) => ({
+      id: item.id ?? index,
+      title: item.title,
+      url: item.url,
+      info: `${item.positive_reactions_count ?? 0} 赞 · ${item.comments_count ?? 0} 评论`,
+      summary: item.description,
+    }));
+  }
+
+  if (source.kind === "wallstreet-hot") {
+    const data = await fetchPayload<{
+      data?: { day_items?: Array<{ id?: number; title?: string; uri?: string }> };
+    }>(source.endpoint);
+    return (data.data?.day_items ?? []).map((item, index) => ({
+      id: item.id ?? index,
+      title: item.title,
+      url: item.uri,
+      info: "今日热门",
+    }));
+  }
+
+  const data = await fetchPayload<{
+    data?: {
+      items?: Array<{
+        content_short?: string;
+        content_text?: string;
+        display_time?: number;
+        id?: number;
+        title?: string;
+        uri?: string;
+      }>;
+    };
+  }>(source.endpoint);
+  return (data.data?.items ?? []).map((item, index) => ({
+    id: item.id ?? index,
+    title: item.title ?? item.content_text,
+    url: item.uri,
+    pubDate: item.display_time ? item.display_time * 1000 : undefined,
+    info: "实时快讯",
+    summary: item.content_short,
+  }));
+}
+
 async function fetchSource(source: SourceDefinition): Promise<SourceResult> {
-  const endpoint = new URL("https://newsnow.busiyi.world/api/s");
-  endpoint.searchParams.set("id", source.id);
-  endpoint.searchParams.set("latest", "");
-
   try {
-    const response = await fetch(endpoint, {
-      headers: {
-        Accept: "application/json, text/plain, */*",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "User-Agent": "Mozilla/5.0 (compatible; RickyNews/1.0)",
-      },
-      cf: {
-        cacheEverything: true,
-        cacheTtl: 600,
-      },
-    } as RequestInit & { cf: { cacheEverything: boolean; cacheTtl: number } });
-
-    if (!response.ok) throw new Error(`Source returned ${response.status}`);
-
-    const data = (await response.json()) as FeedResponse;
-    if (!data.items || !["success", "cache"].includes(data.status ?? "")) {
-      throw new Error("Invalid source response");
-    }
-
-    const items = data.items
+    const rawItems = await loadRawStories(source);
+    const items = rawItems
       .map((item, index): Story | null => {
         const title = safeText(item.title, 220);
-        const url =
-          safeUrl(item.url, source.expectedDomains) ??
-          safeUrl(item.mobileUrl, source.expectedDomains);
+        const url = safeUrl(item.url, source.expectedDomains);
 
         if (!title || !url) return null;
 
@@ -208,20 +404,23 @@ async function fetchSource(source: SourceDefinition): Promise<SourceResult> {
           url,
           source,
           rank: index + 1,
-          info: safeText(item.extra?.info, 64),
-          summary: safeText(item.extra?.hover, 180),
+          info: safeText(item.info, 64),
+          summary: safeText(item.summary, 180),
         };
       })
       .filter((item): item is Story => item !== null)
       .slice(0, 12);
 
+    if (items.length === 0) throw new Error("Source returned no usable items");
+
     return {
       source,
-      status: data.status === "cache" ? "cache" : "live",
-      updatedAt: data.updatedTime,
+      status: "live",
+      updatedAt: Math.max(...rawItems.map((item) => item.pubDate ?? 0), Date.now()),
       items,
     };
-  } catch {
+  } catch (error) {
+    console.error(`Failed to load ${source.id}`, error instanceof Error ? error.message : error);
     return { source, status: "unavailable", items: [] };
   }
 }
@@ -299,7 +498,7 @@ export default async function Home() {
           <p>个数据源在线</p>
           <dl>
             <div><dt>最近更新</dt><dd>{formatTimestamp(latestTimestamp)}</dd></div>
-            <div><dt>缓存周期</dt><dd>约 10 分钟</dd></div>
+            <div><dt>更新方式</dt><dd>打开时获取</dd></div>
           </dl>
         </aside>
       </section>
@@ -389,8 +588,7 @@ export default async function Home() {
           <p>只做信息发现，不代替事实核查与独立判断。</p>
         </div>
         <p>
-          数据接口由 <a href="https://github.com/ourongxing/newsnow" target="_blank" rel="noreferrer">NewsNow</a> 开源项目提供。
-          内容版权归原始发布者所有。
+          数据直接来自各平台公开页面与接口；单个来源失败不会影响其他内容。内容版权归原始发布者所有。
         </p>
       </footer>
     </main>
