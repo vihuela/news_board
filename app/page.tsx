@@ -32,6 +32,9 @@ type RawStory = {
   pubDate?: number;
   info?: unknown;
   summary?: unknown;
+  comments?: number;
+  reactions?: number;
+  heat?: number;
 };
 
 type Story = {
@@ -42,6 +45,12 @@ type Story = {
   rank: number;
   info?: string;
   summary?: string;
+  publishedAt?: number;
+  comments?: number;
+  reactions?: number;
+  heat?: number;
+  xScore: number;
+  xReasons: string[];
 };
 
 type SourceResult = {
@@ -171,6 +180,48 @@ const CATEGORY_LABELS: Record<Category, { eyebrow: string; title: string; descri
   },
 };
 
+const SOURCE_X_FIT: Record<SourceKind, number> = {
+  zhihu: 96,
+  v2ex: 94,
+  ai: 92,
+  hackernews: 88,
+  baidu: 84,
+  bilibili: 82,
+  toutiao: 80,
+  "wallstreet-hot": 74,
+  github: 70,
+  devto: 68,
+  "wallstreet-live": 62,
+};
+
+const DISCUSSION_TERMS = [
+  "该不该",
+  "是否",
+  "为什么",
+  "如何看待",
+  "回应",
+  "争议",
+  "影响",
+  "裁员",
+  "涨价",
+  "降价",
+  "工作",
+  "政策",
+  "安全",
+  "隐私",
+  "教育",
+  "房价",
+  "消费",
+  "开源",
+  "ai",
+  "should",
+  "why",
+  "versus",
+  "vs",
+  "privacy",
+  "open source",
+];
+
 export const dynamic = "force-dynamic";
 
 function normalizeTitle(title: string) {
@@ -245,6 +296,83 @@ function discussionInfo(points?: number, comments?: number) {
   return parts.join(" · ");
 }
 
+function compactNumber(value?: string) {
+  if (!value) return undefined;
+  const matched = value.replace(/,/g, "").match(/([\d.]+)\s*(万|亿)?/);
+  if (!matched) return undefined;
+  const amount = Number(matched[1]);
+  if (!Number.isFinite(amount)) return undefined;
+  if (matched[2] === "亿") return amount * 100_000_000;
+  if (matched[2] === "万") return amount * 10_000;
+  return amount;
+}
+
+function logarithmicSignal(value: number | undefined, reference: number) {
+  if (typeof value !== "number" || value <= 0) return undefined;
+  return Math.min(100, (Math.log1p(value) / Math.log1p(reference)) * 100);
+}
+
+function assessForX(story: Pick<
+  Story,
+  "title" | "source" | "rank" | "publishedAt" | "comments" | "reactions" | "heat"
+>) {
+  const sourceFit = SOURCE_X_FIT[story.source.kind];
+  const rankSignal = Math.max(35, 107 - story.rank * 7);
+  const engagementSignals = [
+    logarithmicSignal(story.comments, 300),
+    logarithmicSignal(story.reactions, 2_000),
+    logarithmicSignal(story.heat, 10_000_000),
+  ].filter((value): value is number => value !== undefined);
+  const engagementSignal = engagementSignals.length > 0
+    ? Math.max(...engagementSignals)
+    : rankSignal * 0.72;
+
+  const ageHours = story.publishedAt
+    ? Math.max(0, (Date.now() - story.publishedAt) / 3_600_000)
+    : undefined;
+  const freshnessSignal = ageHours === undefined
+    ? 70
+    : ageHours <= 2
+      ? 100
+      : ageHours <= 6
+        ? 92
+        : ageHours <= 12
+          ? 82
+          : ageHours <= 24
+            ? 72
+            : ageHours <= 48
+              ? 55
+              : 38;
+
+  const normalizedTitle = story.title.toLocaleLowerCase();
+  const topicBoost = Math.min(
+    6,
+    DISCUSSION_TERMS.filter((term) => normalizedTitle.includes(term)).length * 3,
+  );
+  const score = Math.min(
+    99,
+    Math.round(
+      sourceFit * 0.44
+      + engagementSignal * 0.24
+      + rankSignal * 0.2
+      + freshnessSignal * 0.12
+      + topicBoost,
+    ),
+  );
+
+  const reasons: string[] = [];
+  if ((story.comments ?? 0) >= 30) reasons.push("评论活跃");
+  else if ((story.comments ?? 0) > 0) reasons.push("已有回应");
+  if ((story.heat ?? 0) >= 100_000 || (story.reactions ?? 0) >= 100) reasons.push("热度明显");
+  if (story.rank <= 3) reasons.push("榜单前列");
+  if (topicBoost > 0) reasons.push("有讨论空间");
+  if (ageHours !== undefined && ageHours <= 6) reasons.push("新近话题");
+  if (reasons.length === 0 && sourceFit >= 88) reasons.push("讨论型社区");
+  if (reasons.length === 0) reasons.push("正在升温");
+
+  return { xScore: score, xReasons: reasons.slice(0, 3) };
+}
+
 async function loadRawStories(source: SourceDefinition): Promise<RawStory[]> {
   if (source.kind === "baidu") {
     type BaiduItem = {
@@ -287,6 +415,7 @@ async function loadRawStories(source: SourceDefinition): Promise<RawStory[]> {
       pubDate: item.target?.created ? item.target.created * 1000 : undefined,
       info: item.detail_text,
       summary: item.target?.excerpt,
+      heat: compactNumber(item.detail_text),
     }));
   }
 
@@ -299,6 +428,7 @@ async function loadRawStories(source: SourceDefinition): Promise<RawStory[]> {
       title: item.Title,
       url: `https://www.toutiao.com/trending/${item.ClusterIdStr}/`,
       info: item.HotValue ? `${Math.round(Number(item.HotValue) / 10_000)} 万热度` : undefined,
+      heat: item.HotValue ? Number(item.HotValue) : undefined,
     }));
   }
 
@@ -330,6 +460,8 @@ async function loadRawStories(source: SourceDefinition): Promise<RawStory[]> {
       url: `https://news.ycombinator.com/item?id=${item.objectID}`,
       pubDate: item.created_at ? Date.parse(item.created_at) : undefined,
       info: discussionInfo(item.points, item.num_comments),
+      comments: item.num_comments,
+      reactions: item.points,
     }));
   }
 
@@ -346,6 +478,7 @@ async function loadRawStories(source: SourceDefinition): Promise<RawStory[]> {
         url: repo ? `https://github.com${repo[1]}` : undefined,
         info: starsToday ? decodeHtml(starsToday[1]) : undefined,
         summary: description ? decodeHtml(description[1]) : undefined,
+        reactions: starsToday ? compactNumber(starsToday[1]) : undefined,
       };
     });
   }
@@ -365,6 +498,7 @@ async function loadRawStories(source: SourceDefinition): Promise<RawStory[]> {
       url: item.url,
       info: `${item.replies ?? 0} 回复${item.node?.title ? ` · ${item.node.title}` : ""}`,
       summary: item.content,
+      comments: item.replies,
     }));
   }
 
@@ -383,6 +517,8 @@ async function loadRawStories(source: SourceDefinition): Promise<RawStory[]> {
       url: item.url,
       info: `${item.positive_reactions_count ?? 0} 赞 · ${item.comments_count ?? 0} 评论`,
       summary: item.description,
+      comments: item.comments_count,
+      reactions: item.positive_reactions_count,
     }));
   }
 
@@ -430,7 +566,7 @@ async function fetchSource(source: SourceDefinition): Promise<SourceResult> {
 
         if (!title || !url) return null;
 
-        return {
+        const story = {
           id: `${source.id}-${String(item.id ?? index)}`,
           title,
           url,
@@ -438,7 +574,13 @@ async function fetchSource(source: SourceDefinition): Promise<SourceResult> {
           rank: index + 1,
           info: safeText(item.info, 64),
           summary: safeText(item.summary, 180),
+          publishedAt: item.pubDate,
+          comments: item.comments,
+          reactions: item.reactions,
+          heat: item.heat,
         };
+
+        return { ...story, ...assessForX(story) };
       })
       .filter((item): item is Story => item !== null)
       .slice(0, 12);
@@ -458,19 +600,18 @@ async function fetchSource(source: SourceDefinition): Promise<SourceResult> {
 }
 
 function makeSignalList(results: SourceResult[]) {
-  const available = results.filter((result) => result.items.length > 0);
   const seen = new Set<string>();
   const signals: Story[] = [];
 
-  for (let rank = 0; rank < 7; rank += 1) {
-    for (const result of available) {
-      const story = result.items[rank];
-      if (!story) continue;
-      const key = normalizeTitle(story.title);
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      signals.push(story);
-    }
+  const rankedStories = results
+    .flatMap((result) => result.items)
+    .sort((a, b) => b.xScore - a.xScore || a.rank - b.rank);
+
+  for (const story of rankedStories) {
+    const key = normalizeTitle(story.title);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    signals.push(story);
   }
 
   return signals.slice(0, 18);
@@ -506,7 +647,7 @@ export default async function Home() {
           <span>Ricky 热点雷达</span>
         </a>
         <nav aria-label="内容分类">
-          <a href="#signals">当前信号</a>
+          <a href="#signals">适合发 X</a>
           <a href="#pulse">中文</a>
           <a href="#tech">科技</a>
           <a href="#business">商业</a>
@@ -521,7 +662,7 @@ export default async function Home() {
           <p className="eyebrow">DAILY SIGNAL DESK · BEIJING TIME</p>
           <h1>少刷一点，<br />看见正在发生的事。</h1>
           <p className="hero-description">
-            聚合中文热榜、开发者社区与财经媒体。保留来源，过滤重复，暂不自动发布到 X。
+            聚合中文热榜、开发者社区与财经媒体。默认按 X 传播潜力排序，保留来源，暂不自动发布。
           </p>
         </div>
         <aside className="status-card" aria-label="数据状态">
@@ -538,10 +679,10 @@ export default async function Home() {
       <section className="signals-section" id="signals">
         <div className="section-heading section-heading-light">
           <div>
-            <p className="eyebrow">NOW TRENDING</p>
-            <h2>此刻信号</h2>
+            <p className="eyebrow">X-WORTHY NOW</p>
+            <h2>适合发 X</h2>
           </div>
-          <p>按榜单位置交叉抽取，兼顾不同平台，不让单一算法决定你看到什么。</p>
+          <p>默认按评论信号、热度、时效和讨论空间综合排序；分数用于筛选候选，不代表事实可信度。</p>
         </div>
 
         {signals.length > 0 ? (
@@ -551,10 +692,16 @@ export default async function Home() {
                 <a href={story.url} target="_blank" rel="noreferrer">
                   <div className="signal-meta">
                     <span className="signal-number">{String(index + 1).padStart(2, "0")}</span>
+                    <span className="x-score" aria-label={`适合发 X 评分 ${story.xScore} 分`}>
+                      X 传播 {story.xScore}
+                    </span>
                     <SourceBadge source={story.source} />
-                    <span>榜单 #{story.rank}</span>
+                    <span>原榜 #{story.rank}</span>
                   </div>
                   <h3>{story.title}</h3>
+                  <div className="x-reasons" aria-label="入选理由">
+                    {story.xReasons.map((reason) => <span key={reason}>{reason}</span>)}
+                  </div>
                   {story.summary && <p>{story.summary}</p>}
                   <span className="read-more">查看原文 <span aria-hidden="true">↗</span></span>
                 </a>
