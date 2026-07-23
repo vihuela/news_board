@@ -4,6 +4,7 @@ type Category = "pulse" | "tech" | "business";
 
 type SourceKind =
   | "baidu"
+  | "zhihu"
   | "toutiao"
   | "bilibili"
   | "hackernews"
@@ -59,6 +60,15 @@ const SOURCES: SourceDefinition[] = [
     kind: "baidu",
     endpoint: "https://top.baidu.com/api/board?platform=wise&tab=realtime",
     expectedDomains: ["baidu.com"],
+  },
+  {
+    id: "zhihu",
+    name: "知乎热榜",
+    shortName: "知乎",
+    category: "pulse",
+    kind: "zhihu",
+    endpoint: "https://api.zhihu.com/topstory/hot-list",
+    expectedDomains: ["zhihu.com"],
   },
   {
     id: "toutiao",
@@ -255,6 +265,28 @@ async function loadRawStories(source: SourceDefinition): Promise<RawStory[]> {
       title: item.word,
       url: item.url,
       info: item.labelTagName ?? item.newHotName,
+    }));
+  }
+
+  if (source.kind === "zhihu") {
+    const data = await fetchPayload<{
+      data?: Array<{
+        detail_text?: string;
+        target?: {
+          created?: number;
+          excerpt?: string;
+          id?: number;
+          title?: string;
+        };
+      }>;
+    }>(source.endpoint);
+    return (data.data ?? []).map((item, index) => ({
+      id: item.target?.id ?? index,
+      title: item.target?.title,
+      url: item.target?.id ? `https://www.zhihu.com/question/${item.target.id}` : undefined,
+      pubDate: item.target?.created ? item.target.created * 1000 : undefined,
+      info: item.detail_text,
+      summary: item.target?.excerpt,
     }));
   }
 

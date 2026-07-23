@@ -28,6 +28,7 @@ test("renders the live signal desk", async () => {
   assert.match(html, /少刷一点/);
   assert.match(html, /此刻信号/);
   assert.match(html, /中文热榜/);
+  assert.match(html, /知乎热榜/);
   assert.match(html, /科技与 AI/);
   assert.match(html, /商业与财经/);
   assert.doesNotMatch(html, /<strong>0<small>/);
