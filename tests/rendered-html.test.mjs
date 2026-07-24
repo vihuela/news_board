@@ -32,7 +32,7 @@ test("renders the live signal desk", async () => {
   assert.match(html, /中文热榜/);
   assert.match(html, /知乎热榜/);
   assert.match(html, /1818 黄金眼/);
-  assert.match(html, /https:\/\/www\.bilibili\.com\/video\/BV[\w]+/);
+  assert.match(html, /https:\/\/news\.google\.com\/rss\/articles\//);
   assert.match(html, /科技与 AI/);
   assert.match(html, /商业与财经/);
   assert.doesNotMatch(html, /<strong>0<small>/);
