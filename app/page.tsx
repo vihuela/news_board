@@ -7,6 +7,7 @@ type SourceKind =
   | "zhihu"
   | "toutiao"
   | "bilibili"
+  | "goldeneye"
   | "hackernews"
   | "github"
   | "v2ex"
@@ -95,6 +96,15 @@ const SOURCES: SourceDefinition[] = [
     category: "pulse",
     kind: "bilibili",
     endpoint: "https://s.search.bilibili.com/main/hotword?limit=30",
+    expectedDomains: ["bilibili.com"],
+  },
+  {
+    id: "goldeneye-1818",
+    name: "1818 黄金眼",
+    shortName: "1818",
+    category: "pulse",
+    kind: "goldeneye",
+    endpoint: "https://search.bilibili.com/video?keyword=1818%E9%BB%84%E9%87%91%E7%9C%BC&order=pubdate",
     expectedDomains: ["bilibili.com"],
   },
   {
@@ -187,6 +197,7 @@ const SOURCE_X_FIT: Record<SourceKind, number> = {
   hackernews: 88,
   baidu: 84,
   bilibili: 82,
+  goldeneye: 95,
   toutiao: 80,
   "wallstreet-hot": 74,
   github: 70,
@@ -305,6 +316,29 @@ function compactNumber(value?: string) {
   if (matched[2] === "亿") return amount * 100_000_000;
   if (matched[2] === "万") return amount * 10_000;
   return amount;
+}
+
+function decodeSerializedText(value: string) {
+  return decodeHtml(
+    value
+      .replace(/\\u([\da-f]{4})/gi, (_, code: string) => String.fromCodePoint(Number.parseInt(code, 16)))
+      .replace(/\\\//g, "/")
+      .replace(/\\"/g, '"')
+      .replace(/\\n|\\r|\\t/g, " "),
+  );
+}
+
+function numericField(value: string) {
+  const normalized = value.replace(/^"|"$/g, "").replace(/,/g, "").trim();
+  const amount = Number(normalized);
+  return Number.isFinite(amount) ? amount : undefined;
+}
+
+function formatMetric(value?: number) {
+  if (typeof value !== "number") return undefined;
+  if (value >= 100_000_000) return `${(value / 100_000_000).toFixed(1)} 亿`;
+  if (value >= 10_000) return `${(value / 10_000).toFixed(value >= 100_000 ? 0 : 1)} 万`;
+  return String(Math.round(value));
 }
 
 function logarithmicSignal(value: number | undefined, reference: number) {
@@ -442,6 +476,50 @@ async function loadRawStories(source: SourceDefinition): Promise<RawStory[]> {
       url: `https://search.bilibili.com/all?keyword=${encodeURIComponent(item.keyword ?? "")}`,
       info: `热搜 #${item.pos ?? index + 1}`,
     }));
+  }
+
+  if (source.kind === "goldeneye") {
+    const html = await fetchText(source.endpoint);
+    const itemPattern = /author:([\w$]+),mid:([\w$]+)[\s\S]{0,400}?bvid:"(BV[\w]+)",title:"((?:\\.|[^"\\])*)",description:"((?:\\.|[^"\\])*)"[\s\S]*?,play:([^,}]+)[\s\S]*?,review:([^,}]+),pubdate:(\d+)[\s\S]*?,like:([^,}]+)/g;
+    const matches = [...html.matchAll(itemPattern)];
+    const accountCounts = new Map<string, number>();
+    for (const match of matches) {
+      const accountKey = `${match[1]}:${match[2]}`;
+      accountCounts.set(accountKey, (accountCounts.get(accountKey) ?? 0) + 1);
+    }
+    const officialAccount = [...accountCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+    const seen = new Set<string>();
+    const items: RawStory[] = [];
+
+    for (const match of matches) {
+      const [, authorRef, midRef, bvid, rawTitle, rawDescription, rawViews, rawComments, rawPubDate, rawLikes] = match;
+      if (`${authorRef}:${midRef}` !== officialAccount) continue;
+      const title = decodeSerializedText(rawTitle).replace(/^【?1818黄金眼】?\s*/, "").trim();
+      if (!title || seen.has(bvid) || !decodeSerializedText(rawTitle).includes("1818黄金眼")) continue;
+
+      const views = numericField(rawViews);
+      const comments = numericField(rawComments);
+      const likes = numericField(rawLikes);
+      const info = [
+        views !== undefined ? `${formatMetric(views)}播放` : undefined,
+        comments !== undefined ? `${formatMetric(comments)} 评论` : undefined,
+      ].filter(Boolean).join(" · ");
+
+      seen.add(bvid);
+      items.push({
+        id: bvid,
+        title,
+        url: `https://www.bilibili.com/video/${bvid}`,
+        pubDate: Number(rawPubDate) * 1000,
+        info,
+        summary: decodeSerializedText(rawDescription),
+        comments,
+        reactions: likes,
+        heat: views,
+      });
+    }
+
+    return items.slice(0, 20);
   }
 
   if (source.kind === "hackernews" || source.kind === "ai") {
