@@ -105,7 +105,7 @@ const SOURCES: SourceDefinition[] = [
     category: "pulse",
     kind: "goldeneye",
     endpoint: "https://news.google.com/rss/search?q=1818%E9%BB%84%E9%87%91%E7%9C%BC&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-    expectedDomains: ["news.google.com"],
+    expectedDomains: ["news.google.com", "bing.com"],
   },
   {
     id: "hackernews",
@@ -232,6 +232,9 @@ const DISCUSSION_TERMS = [
   "privacy",
   "open source",
 ];
+
+const GOLDENEYE_BACKUP_ENDPOINT =
+  "https://www.bing.com/news/search?q=1818%E9%BB%84%E9%87%91%E7%9C%BC&format=rss&setlang=zh-hans";
 
 export const dynamic = "force-dynamic";
 
@@ -456,14 +459,25 @@ async function loadRawStories(source: SourceDefinition): Promise<RawStory[]> {
   }
 
   if (source.kind === "goldeneye") {
-    const xml = await fetchText(source.endpoint);
+    const feedResults = await Promise.allSettled([
+      fetchText(source.endpoint),
+      fetchText(GOLDENEYE_BACKUP_ENDPOINT),
+    ]);
+    const availableFeed = feedResults
+      .map((result, index) => result.status === "fulfilled"
+        ? { xml: result.value, provider: index === 0 ? "Google 新闻" : "Bing 新闻" }
+        : undefined)
+      .find((feed) => feed?.xml.includes("<item>"));
+    if (!availableFeed) throw new Error("1818 feeds returned no items");
+
+    const { xml, provider } = availableFeed;
     const readTag = (item: string, tag: string) => {
       const value = item.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, "i"))?.[1];
       return value ? decodeHtml(value.replace(/^<!\[CDATA\[|\]\]>$/g, "")) : undefined;
     };
 
     return (xml.match(/<item>[\s\S]*?<\/item>/gi) ?? []).map((item, index) => {
-      const link = readTag(item, "link");
+      const link = readTag(item, "link")?.replace(/^http:/, "https:");
       const published = readTag(item, "pubDate");
       const publisher = readTag(item, "source");
       return {
@@ -471,7 +485,7 @@ async function loadRawStories(source: SourceDefinition): Promise<RawStory[]> {
         title: readTag(item, "title"),
         url: link,
         pubDate: published ? Date.parse(published) : undefined,
-        info: publisher ? `${publisher} · 1818 相关报道` : "1818 相关报道",
+        info: publisher ? `${publisher} · 1818 相关报道` : `${provider} · 1818 相关报道`,
         summary: readTag(item, "description"),
       };
     });
