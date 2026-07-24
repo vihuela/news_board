@@ -235,6 +235,51 @@ const DISCUSSION_TERMS = [
 
 const GOLDENEYE_BACKUP_ENDPOINT =
   "https://www.bing.com/news/search?q=1818%E9%BB%84%E9%87%91%E7%9C%BC&format=rss&setlang=zh-hans";
+const GOLDENEYE_SECOND_BACKUP_ENDPOINT =
+  "https://www.bing.com/news/search?q=1818%E9%BB%84%E9%87%91%E7%9C%BC&format=rss";
+
+type EdgeCache = {
+  match(request: Request): Promise<Response | undefined>;
+  put(request: Request, response: Response): Promise<void>;
+};
+
+function getEdgeCache() {
+  return (globalThis as typeof globalThis & { caches?: { default?: EdgeCache } }).caches?.default;
+}
+
+function sourceCacheKey(sourceId: string) {
+  return new Request(`https://ricky-news-cache.internal/sources/${sourceId}`);
+}
+
+async function readSourceCache(source: SourceDefinition): Promise<SourceResult | undefined> {
+  try {
+    const response = await getEdgeCache()?.match(sourceCacheKey(source.id));
+    if (!response) return undefined;
+    const cached = await response.json() as SourceResult;
+    if (!Array.isArray(cached.items) || cached.items.length === 0) return undefined;
+    return {
+      ...cached,
+      source,
+      status: "cache",
+      items: cached.items.map((story) => ({ ...story, source })),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeSourceCache(result: SourceResult) {
+  try {
+    await getEdgeCache()?.put(
+      sourceCacheKey(result.source.id),
+      new Response(JSON.stringify(result), {
+        headers: { "Cache-Control": "public, max-age=86400", "Content-Type": "application/json" },
+      }),
+    );
+  } catch {
+    // A cache write must never make a healthy live source look unavailable.
+  }
+}
 
 export const dynamic = "force-dynamic";
 
@@ -462,6 +507,7 @@ async function loadRawStories(source: SourceDefinition): Promise<RawStory[]> {
     const feedResults = await Promise.allSettled([
       fetchText(source.endpoint),
       fetchText(GOLDENEYE_BACKUP_ENDPOINT),
+      fetchText(GOLDENEYE_SECOND_BACKUP_ENDPOINT),
     ]);
     const availableFeed = feedResults
       .map((result, index) => result.status === "fulfilled"
@@ -634,14 +680,18 @@ async function fetchSource(source: SourceDefinition): Promise<SourceResult> {
 
     if (items.length === 0) throw new Error("Source returned no usable items");
 
-    return {
+    const result: SourceResult = {
       source,
       status: "live",
       updatedAt: Math.max(...rawItems.map((item) => item.pubDate ?? 0), Date.now()),
       items,
     };
+    await writeSourceCache(result);
+    return result;
   } catch (error) {
     console.error(`Failed to load ${source.id}`, error instanceof Error ? error.message : error);
+    const cached = await readSourceCache(source);
+    if (cached) return cached;
     return { source, status: "unavailable", items: [] };
   }
 }
